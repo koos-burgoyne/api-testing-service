@@ -1,0 +1,9 @@
+# Requirements to run web app in Docker container
+
+boto3==1.21.16
+docker
+cloudpathlib==0.7.0
+fastapi==0.75.0
+python-multipart
+requests
+uvicorn==0.17.5

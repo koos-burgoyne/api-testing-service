@@ -1,0 +1,88 @@
+name: Build app image, push to AWS ECR, run Terraform Apply
+
+# on:
+#   push:
+#     branches:
+#       - main
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push the image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO_NAME }}
+          ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AUTH_URL: ${{ secrets.AUTH_URL }}
+        run: |
+          echo "Building Docker image..."
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest --build-arg AUTH_URL=$AUTH_URL --build-arg AWS_REGION=$AWS_REGION --build-arg ACCOUNT_ID=$ACCOUNT_ID --build-arg ACCESS_KEY=$ACCESS_KEY --build-arg SECRET_KEY=$SECRET_KEY .
+          echo "Pushing image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+  sync-and-apply:
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Copy files to the s3 website content bucket
+        run: |
+          aws s3 sync . s3://${{ secrets.ECS_S3_BUCKET_NAME }}
+          aws s3 sync s3://${{ secrets.ECS_S3_BUCKET_NAME }} .
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Plan
+        env:
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          REGION: ${{ secrets.AWS_REGION }}
+        id: plan
+        run: terraform plan -no-color -var "aws_access_key_id=$ACCESS_KEY" -var "aws_secret_access_key=$SECRET_KEY" -var "git_commit_hash=$IMAGE_TAG" -var "account_id=$ACCOUNT_ID" -var "region=$REGION"
+        continue-on-error: true
+
+      - name: Terraform Apply
+        run: terraform apply -var "aws_access_key_id=$ACCESS_KEY" -var "aws_secret_access_key=$SECRET_KEY" -var "git_commit_hash=$IMAGE_TAG" -var "account_id=$ACCOUNT_ID" -var "region=$REGION" --auto-approve
